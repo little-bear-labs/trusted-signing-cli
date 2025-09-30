@@ -6,6 +6,11 @@ use std::{ffi::OsString, fs, iter, path::Path, vec};
 use trauma::{download::Download, downloader::DownloaderBuilder};
 use zip_extensions::zip_extract;
 
+#[cfg(windows)]
+use windows::Win32::Storage::FileSystem::{
+    GetFileAttributesW, SetFileAttributesW, FILE_ATTRIBUTE_READONLY, FILE_FLAGS_AND_ATTRIBUTES,
+};
+
 /// Metadata object
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Metadata {
@@ -218,13 +223,40 @@ async fn run(args: Args) -> Result<(), String> {
     }
 
     for file in args.file {
-        if args.ignore_unsupported {
-            if !is_supported(&file) {
-                continue;
-            }
+        if args.ignore_unsupported && !is_supported(&file) {
+            continue;
         }
 
-        cmd(
+        #[cfg(windows)]
+        let (was_readonly, original_attrs) = {
+            use std::os::windows::ffi::OsStrExt;
+            let wide: Vec<u16> = std::ffi::OsStr::new(&file)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+
+            unsafe {
+                let attrs = GetFileAttributesW(windows::core::PCWSTR(wide.as_ptr()));
+                let was_readonly = attrs.0 & FILE_ATTRIBUTE_READONLY.0 != 0;
+
+                if was_readonly {
+                    let new_attrs = FILE_FLAGS_AND_ATTRIBUTES(attrs.0 & !FILE_ATTRIBUTE_READONLY.0);
+                    SetFileAttributesW(windows::core::PCWSTR(wide.as_ptr()), new_attrs).map_err(
+                        |err| {
+                            format!(
+                                "could not remove read-only attribute from file '{:?}': {:?}",
+                                &file, err
+                            )
+                        },
+                    )?;
+                }
+
+                (was_readonly, attrs)
+            }
+        };
+
+        // Sign the file
+        let sign_result = cmd(
             &args.sign_tool_path,
             cmd_args.iter().chain(iter::once(&file.clone().into())),
         )
@@ -234,7 +266,29 @@ async fn run(args: Args) -> Result<(), String> {
                 "signtool '{}' could not sign the file '{:?}', error: {:?}",
                 &args.sign_tool_path, &file, &err
             )
-        })?;
+        });
+
+        #[cfg(windows)]
+        if was_readonly {
+            use std::os::windows::ffi::OsStrExt;
+            let wide: Vec<u16> = std::ffi::OsStr::new(&file)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+
+            unsafe {
+                SetFileAttributesW(windows::core::PCWSTR(wide.as_ptr()), original_attrs).map_err(
+                    |err| {
+                        format!(
+                            "could not restore read-only attribute to file '{:?}': {:?}",
+                            &file, err
+                        )
+                    },
+                )?;
+            }
+        }
+
+        sign_result?;
     }
 
     Ok(())
