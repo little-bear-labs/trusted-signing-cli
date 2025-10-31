@@ -237,10 +237,18 @@ async fn run(args: Args) -> Result<(), String> {
 
             unsafe {
                 let attrs = GetFileAttributesW(windows::core::PCWSTR(wide.as_ptr()));
-                let was_readonly = attrs.0 & FILE_ATTRIBUTE_READONLY.0 != 0;
+                if attrs == u32::MAX {
+                    return Err(format!(
+                        "could not read attributes for file '{:?}': {:?}",
+                        &file,
+                        windows::core::Error::from_win32()
+                    ));
+                }
+
+                let was_readonly = attrs & FILE_ATTRIBUTE_READONLY.0 != 0;
 
                 if was_readonly {
-                    let new_attrs = FILE_FLAGS_AND_ATTRIBUTES(attrs.0 & !FILE_ATTRIBUTE_READONLY.0);
+                    let new_attrs = FILE_FLAGS_AND_ATTRIBUTES(attrs & !FILE_ATTRIBUTE_READONLY.0);
                     SetFileAttributesW(windows::core::PCWSTR(wide.as_ptr()), new_attrs).map_err(
                         |err| {
                             format!(
@@ -251,7 +259,7 @@ async fn run(args: Args) -> Result<(), String> {
                     )?;
                 }
 
-                (was_readonly, attrs)
+                (was_readonly, FILE_FLAGS_AND_ATTRIBUTES(attrs))
             }
         };
 
